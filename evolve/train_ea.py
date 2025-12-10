@@ -25,9 +25,9 @@ def main():
     os.makedirs(outdir, exist_ok=True)
 
     meta = {
-        "pop": 64,
-        "gens": 40,
-        "steps": 4000,
+        "pop": 60,
+        "gens": 15,
+        "steps": 5000,
         "J": 0.4,
         "wall_contrast": 0.5,
         "seed": 123,
@@ -74,7 +74,7 @@ def main():
         new_pop.extend(elite)
         while len(new_pop) < meta["pop"]:
             parent = rng.choice(breeders)
-            child = mutate(parent, sigma=0.1, rng=rng)
+            child = mutate(parent, sigma=0.3, rng=rng)
             new_pop.append(child)
 
         pop = new_pop

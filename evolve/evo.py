@@ -1,11 +1,13 @@
 # evolve/evo.py
 import math
+import os
+import json
+import time
 import random
+import torch
 from typing import Tuple
 
-import torch
-
-from sim import Arena, ARENA_BASE_R, radial_distance_to_boundary
+from sim import Arena
 from policy import new_policy
 from fitness import FoodField, per_step_reward
 
@@ -18,31 +20,26 @@ def evaluate(
     seed: int = 0
 ) -> Tuple[float, dict]:
     """
-    Evaluate one genome:
+    Evaluate a single policy (given by state_dict) in the Arena.
 
-    - Randomize geometry per evaluation:
-        * R_scale ∈ [0.7, 1.3]
-        * aspect  ∈ [0.7, 1.3]  (ellipse: a = R_eff * aspect, b = R_eff / aspect)
-    - Build Arena with those params.
-    - Run a single episode of `steps`.
-    - Return (total_reward, stats).
+    Setup:
+      - Two food pellets at a time (FoodField(n=2)).
+      - Food respawns only when eaten.
+      - Reward:
+          +λf for eating food
+          -λc for collisions
+        No close-wall penalty, no movement bonus.
     """
     rng = random.Random(seed)
-
-    # Domain randomization: radius & ellipticity
-    R_scale = rng.uniform(0.7, 1.3)
-    aspect = rng.uniform(0.7, 1.3)
 
     # build policy and load weights
     pol = new_policy()
     if weights_sd:
         pol.load_state_dict(weights_sd)
 
-    # environment with randomized geometry
-    env = Arena(J=J, wall_contrast=wall_contrast, seed=seed,
-                R_scale=R_scale, aspect=aspect)
-    # food layout inside same ellipse
-    food = FoodField(a=env.a, b=env.b, n_init=4, n_max=4, seed=seed)
+    # environment
+    env = Arena(J=J, wall_contrast=wall_contrast, seed=seed)
+    food = FoodField(n=2, seed=seed)  # TWO pellets at a time now
     env.reset()
 
     total_r = 0.0
@@ -61,28 +58,21 @@ def evaluate(
         collected = food.step_collect(env.agent.x, env.agent.y)
         collected_total += collected
 
-        # distance to boundary along radial direction
-        d_wall = radial_distance_to_boundary(env.agent.x, env.agent.y, env.a, env.b)
-        # movement length
+        # d_wall and move_len are still computed so we can pass them into
+        # per_step_reward for compatibility, even though they are currently unused.
+        d_wall = 250.0 - ((env.agent.x ** 2 + env.agent.y ** 2) ** 0.5)
         move_len = math.hypot(env.agent.x - last_pos[0], env.agent.y - last_pos[1])
         last_pos = (env.agent.x, env.agent.y)
 
         total_r += per_step_reward(d_wall, env.collided_prev, move_len, collected)
 
-    stats = {
+    return total_r, {
         "collisions": collisions,
         "food": collected_total,
-        "total_reward": total_r,
-        "R_scale": R_scale,
-        "aspect": aspect,
     }
-    return total_r, stats
 
 
-def mutate(sd, sigma: float = 0.1, rng=None):
-    """
-    Gaussian mutation over a state_dict.
-    """
+def mutate(sd, sigma=0.1, rng=None):
     if rng is None:
         rng = random.Random()
     out = {}

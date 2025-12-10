@@ -29,7 +29,7 @@ os.makedirs(EP_DIR, exist_ok=True)
 
 # === path to your trained model (.pt) ===
 # Make sure this path exists relative to backend/, or change to your actual best.pt
-POLICY_PATH = os.path.join("evo", "elly.pt")
+POLICY_PATH = os.path.join("evo", "best.pt")
 
 HTML = """<html><body>
 <h3>Circle-Arena Jellyfish backend</h3>

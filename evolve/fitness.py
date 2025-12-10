@@ -3,107 +3,116 @@ import math
 import random
 from typing import List, Tuple
 
+FOOD_R = 3.0
+ARENA_R = 250.0
+
 
 class FoodField:
     """
-    Food field inside an ellipse (a,b):
+    Food field for the EA:
 
-    - At reset: spawn n_init food pellets uniformly in the ellipse.
-    - Each step:
-        * Any pellet within FOOD_R of the agent is eaten.
-        * Eaten pellets are removed.
-        * New pellets are spawned until there are n_max total.
+      - We keep a fixed number of pellets (n) in the arena.
+      - On each step, if the agent is close enough to a pellet, it is "eaten"
+        and immediately respawned somewhere else.
+
+    IMPORTANT CHANGE:
+      - On episode start:
+          * The FIRST pellet is forced to be NON-CENTRAL
+            (i.e., outside an inner radius of the arena).
+          * All other pellets (and all respawns) are uniform in the disk.
+
+        This prevents the initial "coward" that sits in the middle from
+        being rewarded just because the first pellet happens to spawn centrally.
     """
 
-    def __init__(self, a: float, b: float,
-                 n_init: int = 4, n_max: int = 4,
-                 seed: int = 0,
-                 food_r: float = 3.0):
+    def __init__(self, n: int = 2, seed: int = 0):
         self.rng = random.Random(seed)
-        self.a = float(a)
-        self.b = float(b)
-        self.n_max = n_max
-        self.food_r = float(food_r)
+        self.points: List[Tuple[float, float]] = []
 
-        n_init = min(n_init, n_max)
-        self.points: List[Tuple[float, float]] = [
-            self._rand_point() for _ in range(n_init)
-        ]
+        for i in range(n):
+            if i == 0:
+                # First pellet: non-central
+                self.points.append(self._rand_point_noncentral())
+            else:
+                # Other initial pellets: normal uniform in disk
+                self.points.append(self._rand_point())
+
+    # --- sampling helpers ---
 
     def _rand_point(self) -> Tuple[float, float]:
         """
-        Uniform sampling inside ellipse:
-        sample from unit disk, then scale by a,b.
+        Uniform in disk (slightly inside the boundary).
         """
-        r = math.sqrt(self.rng.random())  # radius in [0,1], area-uniform
-        theta = 2 * math.pi * self.rng.random()
-        x_unit = r * math.cos(theta)
-        y_unit = r * math.sin(theta)
-        return (x_unit * self.a * 0.9, y_unit * self.b * 0.9)  # 0.9 margin
+        r = ARENA_R * math.sqrt(self.rng.random()) * 0.9
+        a = 2 * math.pi * self.rng.random()
+        return (r * math.cos(a), r * math.sin(a))
+
+    def _rand_point_noncentral(self) -> Tuple[float, float]:
+        """
+        Sample a point that is NOT near the center.
+
+        Implementation: rejection sampling.
+        Repeatedly sample from _rand_point() until the radius is
+        outside some inner fraction of ARENA_R (e.g. > 0.4 * R).
+
+        This ensures the first pellet is somewhere in the mid/outer region,
+        so a policy that just spins in the center cannot get rewarded
+        from the very first spawn.
+        """
+        min_radius = 0.4 * ARENA_R  # you can tune this (0.3, 0.5, ...)
+        while True:
+            x, y = self._rand_point()
+            if math.hypot(x, y) > min_radius:
+                return (x, y)
+
+    # --- per-step logic ---
 
     def step_collect(self, x: float, y: float) -> int:
         """
-        - Check which pellets are eaten at (x, y).
-        - Remove them.
-        - Respawn new pellets until we have n_max total.
-        - Return number eaten this step.
+        Check if agent is close enough to any pellet to collect it.
+
+        Returns:
+            collected (int): how many pellets were eaten this step.
+
+        For each eaten pellet, we immediately spawn a new one
+        using the NORMAL uniform distribution (_rand_point), not the
+        noncentral version. After the first spawn, we allow central food.
         """
         collected = 0
-        remaining: List[Tuple[float, float]] = []
+        new_points: List[Tuple[float, float]] = []
 
         for (fx, fy) in self.points:
-            if math.hypot(x - fx, y - fy) <= self.food_r:
+            if math.hypot(x - fx, y - fy) <= FOOD_R:
                 collected += 1
+                # respawn a fresh pellet (now fully uniform again)
+                new_points.append(self._rand_point())
             else:
-                remaining.append((fx, fy))
+                new_points.append((fx, fy))
 
-        while len(remaining) < self.n_max:
-            remaining.append(self._rand_point())
-
-        self.points = remaining
+        self.points = new_points
         return collected
 
 
-def per_step_reward(
-    d_wall: float,
-    collided: int,
-    move_len: float,
-    collected: int
-) -> float:
+def per_step_reward(d_wall, collided, move_len, collected):
     """
     Reward shaping:
 
-    - Big negative for collisions.
-    - Mild penalty for being too close to wall.
-    - Positive for movement (encourages exploration).
-    - Strong positive for collecting food.
-    - Hunger penalty if no food collected on this step.
-    """
+      - NO close-to-wall penalty.
+      - NO movement bonus.
+      - ONLY:
+          * negative reward for collisions
+          * positive reward for eating food
 
-    # You can tune these
-    λc = 15.0    # collision penalty
-    λw = 0.01    # proximity penalty if within R_margin
-    λm = 0.02    # movement bonus per unit distance
-    λf = 4.0     # food reward per item
-    λh = 0.02    # hunger penalty per step with no food
-    R_margin = 40.0
+    Arguments d_wall and move_len are kept for compatibility but unused.
+    Adjust λc and λf as you like.
+    """
+    λc = 5.0      # collision penalty
+    λf = 1500.0     # reward for eating one food pellet (tune as needed)
 
     r = 0.0
-
-    # wall / collision cost
     if collided:
         r -= λc
-    if d_wall < R_margin:
-        r -= λw * (R_margin - d_wall)
-
-    # exploration (distance actually moved)
-    r += λm * move_len
-
-    # food
-    r += λf * collected
-
-    # hunger: penalize steps without food
-    if collected == 0:
-        r -= λh
+    if collected > 0:
+        r += λf * collected
 
     return r

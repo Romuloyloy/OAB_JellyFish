@@ -10,17 +10,10 @@ except ImportError:
     nn = None
 
 
-IN_DIM = 5   # [contrast, collided_prev, J, cosθ, sinθ]
+# Inputs: [contrast_front, collided_prev]
+IN_DIM = 2
 HID = 16
 OUT_DIM = 6  # [turn_L, turn_R, turn_NONE, p1, p2, p3]
-
-
-def _heading_to_angle(idx: int) -> float:
-    """
-    Map discrete heading index (0..15) to a continuous angle.
-    Convention: 8=E(0), 4=N(pi/2), 0=W(pi), 12=S(3pi/2).
-    """
-    return ((8 - (idx % 16) + 16) % 16) * (2 * math.pi / 16)
 
 
 if nn is not None:
@@ -33,10 +26,10 @@ if nn is not None:
                 nn.Linear(HID, OUT_DIM)
             )
 
-        def forward(self, x):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
             return self.net(x)
 else:
-    # Dummy placeholder so the module imports even without torch.
+    # Dummy placeholder so module still imports if torch is missing
     class _TinyMLP:  # type: ignore
         def __init__(self):
             raise RuntimeError("PyTorch not available. Install torch to use policy mode.")
@@ -55,25 +48,29 @@ class _PolicyWrapper:
         self.model.load_state_dict(sd)
 
     @torch.no_grad()
-    def act(self, obs: Dict[str, Any]) -> (int, int, int):
+    def act(self, obs: Dict[str, Any]) -> tuple[int, int, int]:
         """
-        obs keys expected:
-          - contrast_front
-          - collided_prev
-          - j (or J)
-          - heading_index
+        Runtime policy input:
+
+          - contrast_front    (float)
+          - collided_prev     (0/1)
+
+        J and positional info (heading) are deliberately NOT fed to the NN.
         """
-        ang = _heading_to_angle(int(obs.get("heading_index", 8)))
-        x = torch.tensor([[float(obs.get("contrast_front", 0.0)),
-                           float(obs.get("collided_prev", 0)),
-                           float(obs.get("j", obs.get("J", 0.0))),
-                           math.cos(ang), math.sin(ang)]],
-                         dtype=torch.float32)
+        x = torch.tensor(
+            [[
+                float(obs.get("contrast_front", 0.0)),
+                float(obs.get("collided_prev", 0)),
+            ]],
+            dtype=torch.float32,
+        )
         logits = self.model(x)[0]
-        # First 3 logits: turn
+
+        # First 3 logits: turn choice
         turn = int(torch.argmax(logits[:3]).item())   # 0:L, 1:R, 2:NONE
-        # Last 3 logits: pace
-        pace = int(torch.argmax(logits[3:]).item())   # 0->P=1, 1->P=2, 2->P=3
+        # Last 3 logits: pace choice
+        pace = int(torch.argmax(logits[3:]).item())   # 0→P=1, 1→P=2, 2→P=3
+
         L = 1 if turn == 0 else 0
         R = 1 if turn == 1 else 0
         P = pace + 1
@@ -88,10 +85,13 @@ class Brain:
         L,R ∈ {(1,0),(0,1),(0,0)} with probs [0.3, 0.3, 0.4], P ∈ {1,2,3} uniform.
 
       - 'policy': TinyMLP loaded from a torch state_dict (.pt file).
+
+    NOTE: The NN now only sees [contrast_front, collided_prev].
+          J and heading/orientation are NOT inputs to the network.
     """
     def __init__(self, seed: Optional[int] = None):
         self.rng = random.Random(seed)
-        self.J: float = 0.0
+        self.J: float = 0.0            # kept for logging / UI, but not used as NN input
         self.wall_contrast: float = 0.0
         self.mode: str = "random"
         self.policy: Optional[_PolicyWrapper] = None
@@ -99,6 +99,7 @@ class Brain:
 
     # --- lifecycle ---
     def reset(self, J: float, wall_contrast: float) -> None:
+        # J still exists as an environment parameter, but NN ignores it.
         self.J = float(J)
         self.wall_contrast = float(wall_contrast)
 
@@ -145,9 +146,6 @@ class Brain:
         input_labels = [
             "contrast_front",
             "collided_prev",
-            "J",
-            "cos(theta)",
-            "sin(theta)",
         ]
         output_labels = [
             "turn_L",
@@ -183,11 +181,11 @@ class Brain:
             L, R, P = self.policy.act({
                 "contrast_front": obs.get("contrast_front", 0.0),
                 "collided_prev": obs.get("collided_prev", 0),
-                "j": obs.get("j", obs.get("J", self.J)),
-                "heading_index": obs.get("heading_index", 8),
             })
             return {
-                "L": L, "R": R, "P": P,
+                "L": L,
+                "R": R,
+                "P": P,
                 "debug": {
                     "mode": "policy",
                     "J": self.J,
@@ -196,7 +194,7 @@ class Brain:
                     "policy_path": self.policy_path,
                     "obs_contrast": obs.get("contrast_front"),
                     "obs_collided_prev": obs.get("collided_prev"),
-                }
+                },
             }
 
         # Fallback: random Phase 0 policy
@@ -221,5 +219,5 @@ class Brain:
                 "wall_contrast": self.wall_contrast,
                 "obs_contrast": obs.get("contrast_front"),
                 "obs_collided_prev": obs.get("collided_prev"),
-            }
+            },
         }
