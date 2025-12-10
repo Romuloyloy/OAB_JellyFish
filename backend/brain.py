@@ -2,8 +2,6 @@ import math
 import random
 from typing import Dict, Any, Optional
 
-# Optional: if you put policy.py next to this file, import from there.
-# Otherwise this inline TinyMLP+Policy matches evolve/policy.py exactly.
 try:
     import torch
     import torch.nn as nn
@@ -18,23 +16,36 @@ OUT_DIM = 6  # [turn_L, turn_R, turn_NONE, p1, p2, p3]
 
 
 def _heading_to_angle(idx: int) -> float:
-    # Mapping: 8=E(0), 4=N(pi/2), 0=W(pi), 12=S(3pi/2)
+    """
+    Map discrete heading index (0..15) to a continuous angle.
+    Convention: 8=E(0), 4=N(pi/2), 0=W(pi), 12=S(3pi/2).
+    """
     return ((8 - (idx % 16) + 16) % 16) * (2 * math.pi / 16)
 
 
-class _TinyMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(IN_DIM, HID), nn.Tanh(),
-            nn.Linear(HID, OUT_DIM)
-        )
+if nn is not None:
 
-    def forward(self, x):
-        return self.net(x)
+    class _TinyMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(IN_DIM, HID), nn.Tanh(),
+                nn.Linear(HID, OUT_DIM)
+            )
+
+        def forward(self, x):
+            return self.net(x)
+else:
+    # Dummy placeholder so the module imports even without torch.
+    class _TinyMLP:  # type: ignore
+        def __init__(self):
+            raise RuntimeError("PyTorch not available. Install torch to use policy mode.")
 
 
 class _PolicyWrapper:
+    """
+    Wrap TinyMLP so Brain can call .act(obs) directly.
+    """
     def __init__(self):
         if torch is None:
             raise RuntimeError("PyTorch not available. Install torch to use policy mode.")
@@ -45,17 +56,23 @@ class _PolicyWrapper:
 
     @torch.no_grad()
     def act(self, obs: Dict[str, Any]) -> (int, int, int):
-        # Build input vector in the same order as training
+        """
+        obs keys expected:
+          - contrast_front
+          - collided_prev
+          - j (or J)
+          - heading_index
+        """
         ang = _heading_to_angle(int(obs.get("heading_index", 8)))
         x = torch.tensor([[float(obs.get("contrast_front", 0.0)),
                            float(obs.get("collided_prev", 0)),
-                           float(obs.get("j", obs.get("J", 0.0))),  # allow 'j' or 'J'
+                           float(obs.get("j", obs.get("J", 0.0))),
                            math.cos(ang), math.sin(ang)]],
                          dtype=torch.float32)
         logits = self.model(x)[0]
-        # First 3 logits: turn choice
+        # First 3 logits: turn
         turn = int(torch.argmax(logits[:3]).item())   # 0:L, 1:R, 2:NONE
-        # Last 3 logits: pace choice
+        # Last 3 logits: pace
         pace = int(torch.argmax(logits[3:]).item())   # 0->P=1, 1->P=2, 2->P=3
         L = 1 if turn == 0 else 0
         R = 1 if turn == 1 else 0
@@ -66,12 +83,11 @@ class _PolicyWrapper:
 class Brain:
     """
     Brain with two modes:
-      - 'random' (default): Phase 0 random policy.
-      - 'policy': load a TinyMLP from a saved state_dict (.pt) and use it.
 
-    Random policy:
-      - L,R ∈ {(1,0),(0,1),(0,0)} with probs [0.3, 0.3, 0.4]
-      - P ∈ {1,2,3} uniform
+      - 'random' (default): Phase 0 random policy
+        L,R ∈ {(1,0),(0,1),(0,0)} with probs [0.3, 0.3, 0.4], P ∈ {1,2,3} uniform.
+
+      - 'policy': TinyMLP loaded from a torch state_dict (.pt file).
     """
     def __init__(self, seed: Optional[int] = None):
         self.rng = random.Random(seed)
@@ -105,11 +121,66 @@ class Brain:
         self.policy_path = path
         self.mode = "policy"
 
+    def describe_network(self) -> dict:
+        """
+        Return a JSON-serializable description of the current policy network.
+        Used by /nn for frontend visualization.
+        """
+        if self.policy is None or not hasattr(self.policy, "model"):
+            return {
+                "mode": self.mode,
+                "has_policy": False,
+            }
+
+        model = self.policy.model
+        # Sequential(Linear(IN_DIM, HID), Tanh, Linear(HID, OUT_DIM))
+        layer1 = model.net[0]
+        layer2 = model.net[2]
+
+        w1 = layer1.weight.detach().cpu().tolist()   # [hidden][input]
+        b1 = layer1.bias.detach().cpu().tolist()
+        w2 = layer2.weight.detach().cpu().tolist()   # [output][hidden]
+        b2 = layer2.bias.detach().cpu().tolist()
+
+        input_labels = [
+            "contrast_front",
+            "collided_prev",
+            "J",
+            "cos(theta)",
+            "sin(theta)",
+        ]
+        output_labels = [
+            "turn_L",
+            "turn_R",
+            "turn_NONE",
+            "P=1",
+            "P=2",
+            "P=3",
+        ]
+
+        return {
+            "mode": self.mode,
+            "has_policy": True,
+            "input_labels": input_labels,
+            "hidden_size": len(b1),
+            "output_labels": output_labels,
+            "layers": {
+                "input_to_hidden": {
+                    "weights": w1,
+                    "bias": b1,
+                },
+                "hidden_to_output": {
+                    "weights": w2,
+                    "bias": b2,
+                },
+            },
+        }
+
     # --- stepping ---
     def act(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        # Policy mode (NN)
         if self.mode == "policy" and self.policy is not None:
             L, R, P = self.policy.act({
-                # ensure keys are present exactly as training expected
                 "contrast_front": obs.get("contrast_front", 0.0),
                 "collided_prev": obs.get("collided_prev", 0),
                 "j": obs.get("j", obs.get("J", self.J)),
@@ -128,7 +199,7 @@ class Brain:
                 }
             }
 
-        # fallback: random (Phase 0)
+        # Fallback: random Phase 0 policy
         lr_choices = [(1, 0), (0, 1), (0, 0)]
         lr_probs = [0.3, 0.3, 0.4]
         r = self.rng.random()
