@@ -10,7 +10,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from brain import Brain
 
 app = FastAPI()
-
 # Keep reference to the most recent Brain used in /brain WS
 latest_brain: Optional[Brain] = None
 
@@ -18,23 +17,18 @@ latest_brain: Optional[Brain] = None
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# Episode logs: backend/runs/episodes
 EP_DIR = os.path.join("runs", "episodes")
 os.makedirs(EP_DIR, exist_ok=True)
 
 # === path to your trained model (.pt) ===
-# Make sure this path exists relative to backend/, or change to your actual best.pt
-POLICY_PATH = os.path.join("evo", "best.pt")
+POLICY_PATH = os.path.join("evo", "neo.pt")
 
 HTML = """<html><body>
 <h3>Circle-Arena Jellyfish backend</h3>
 <p>WS at <code>/brain</code></p>
-<p>NN description at <code>/nn</code></p>
 </body></html>"""
 
 
@@ -47,7 +41,7 @@ async def root():
 async def describe_nn():
     """
     Return JSON description of the currently active policy network.
-    Used by the React NetworkView.
+    Requires Brain to implement describe_network().
     """
     global latest_brain
     if latest_brain is None:
@@ -90,17 +84,14 @@ async def brain_ws(ws: WebSocket):
                 brain = Brain(seed=seed)
                 brain.reset(J, wall_contrast)
 
-                # Load evolved policy automatically if available
+                # --- load evolved policy automatically if available ---
                 if os.path.exists(POLICY_PATH):
                     try:
                         brain.load_policy(POLICY_PATH)
                         print(f"[Brain] Loaded policy from {POLICY_PATH}")
                     except Exception as e:
                         print(f"[Brain] Failed to load policy ({e}); reverting to random.")
-                        try:
-                            brain.set_mode("random")
-                        except Exception:
-                            pass
+                        brain.set_mode("random")
                 else:
                     print(f"[Brain] Policy file not found: {POLICY_PATH} (using random mode)")
 
@@ -116,8 +107,8 @@ async def brain_ws(ws: WebSocket):
                     fieldnames=[
                         "t", "J", "wall_contrast",
                         "contrast_front", "collided_prev",
-                        "L", "R", "P",
-                    ],
+                        "L", "R", "P"
+                    ]
                 )
                 writer.writeheader()
 
@@ -127,10 +118,7 @@ async def brain_ws(ws: WebSocket):
                 if not brain:
                     await ws.send_json({
                         "type": "action",
-                        "act": {
-                            "L": 0, "R": 0, "P": 1,
-                            "debug": {"note": "no reset yet"},
-                        },
+                        "act": {"L": 0, "R": 0, "P": 1, "debug": {"note": "no reset yet"}}
                     })
                     continue
 
@@ -145,7 +133,7 @@ async def brain_ws(ws: WebSocket):
                         "wall_contrast": brain.wall_contrast,
                         "contrast_front": obs.get("contrast_front"),
                         "collided_prev": obs.get("collided_prev"),
-                        "L": act["L"], "R": act["R"], "P": act["P"],
+                        "L": act["L"], "R": act["R"], "P": act["P"]
                     })
                     csv_file.flush()
 

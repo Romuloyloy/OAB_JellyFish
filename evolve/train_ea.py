@@ -25,9 +25,9 @@ def main():
     os.makedirs(outdir, exist_ok=True)
 
     meta = {
-        "pop": 60,
+        "pop": 400,
         "gens": 15,
-        "steps": 5000,
+        "steps": 10000,
         "J": 0.4,
         "wall_contrast": 0.5,
         "seed": 123,

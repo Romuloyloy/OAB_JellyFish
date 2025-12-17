@@ -2,6 +2,8 @@ import math
 import random
 from typing import Dict, Any, Optional
 
+# Matches evolve/policy.py AFTER you removed J/positional info:
+# Inputs: [contrast_front, collided_prev] -> 2 dims
 try:
     import torch
     import torch.nn as nn
@@ -9,101 +11,120 @@ except ImportError:
     torch = None
     nn = None
 
-
-# Inputs: [contrast_front, collided_prev]
-IN_DIM = 2
+IN_DIM = 2   # [contrast_front, collided_prev]
 HID = 16
-OUT_DIM = 6  # [turn_L, turn_R, turn_NONE, p1, p2, p3]
+OUT_DIM = 6  # [turn_L, turn_R, turn_NONE, P1, P2, P3]
 
 
-if nn is not None:
+def _heading_to_angle(idx: int) -> float:
+    """
+    Kept for future use (if you later reintroduce angle features).
+    Current policy does NOT use angle, so this is unused in act_with_debug.
+    Mapping: 8=E(0), 4=N(pi/2), 0=W(pi), 12=S(3pi/2)
+    """
+    return ((8 - (idx % 16) + 16) % 16) * (2 * math.pi / 16)
 
-    class _TinyMLP(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.net = nn.Sequential(
-                nn.Linear(IN_DIM, HID), nn.Tanh(),
-                nn.Linear(HID, OUT_DIM)
-            )
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return self.net(x)
-else:
-    # Dummy placeholder so module still imports if torch is missing
-    class _TinyMLP:  # type: ignore
-        def __init__(self):
-            raise RuntimeError("PyTorch not available. Install torch to use policy mode.")
+class _TinyMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(IN_DIM, HID), nn.Tanh(),
+            nn.Linear(HID, OUT_DIM)
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 
 class _PolicyWrapper:
     """
-    Wrap TinyMLP so Brain can call .act(obs) directly.
+    Thin wrapper around TinyMLP that can:
+      - load weights
+      - run a forward pass with access to hidden activations + logits
+
+    IMPORTANT: Input is exactly 2-D:
+        x = [contrast_front, collided_prev]
     """
     def __init__(self):
         if torch is None:
             raise RuntimeError("PyTorch not available. Install torch to use policy mode.")
         self.model = _TinyMLP()
+        # unpack layers so we can peek inside
+        self.l1 = self.model.net[0]  # Linear(IN_DIM, HID)
+        self.l2 = self.model.net[2]  # Linear(HID, OUT_DIM)
 
     def load_state_dict(self, sd):
         self.model.load_state_dict(sd)
 
     @torch.no_grad()
-    def act(self, obs: Dict[str, Any]) -> tuple[int, int, int]:
+    def act_with_debug(self, obs: Dict[str, Any]):
         """
-        Runtime policy input:
+        Forward pass that returns:
+          (L, R, P, hidden_activations, logits)
 
-          - contrast_front    (float)
-          - collided_prev     (0/1)
-
-        J and positional info (heading) are deliberately NOT fed to the NN.
+        Input vector:
+          x = [contrast_front, collided_prev]
         """
-        x = torch.tensor(
-            [[
-                float(obs.get("contrast_front", 0.0)),
-                float(obs.get("collided_prev", 0)),
-            ]],
-            dtype=torch.float32,
-        )
-        logits = self.model(x)[0]
+        cf = float(obs.get("contrast_front", 0.0))
+        cp = float(obs.get("collided_prev", 0))
 
-        # First 3 logits: turn choice
-        turn = int(torch.argmax(logits[:3]).item())   # 0:L, 1:R, 2:NONE
-        # Last 3 logits: pace choice
-        pace = int(torch.argmax(logits[3:]).item())   # 0→P=1, 1→P=2, 2→P=3
+        x = torch.tensor([[cf, cp]], dtype=torch.float32)
+
+        # manual forward so we can inspect
+        h1 = self.l1(x)
+        a1 = torch.tanh(h1)      # hidden activations
+        out = self.l2(a1)        # logits
+
+        hidden = a1[0].cpu().tolist()   # length HID
+        logits = out[0].cpu().tolist()  # length OUT_DIM
+
+        # Decision rule (same as before, just using 'out')
+        turn = int(torch.argmax(out[0, :3]).item())   # 0:L, 1:R, 2:NONE
+        pace = int(torch.argmax(out[0, 3:]).item())   # 0->1,1->2,2->3
 
         L = 1 if turn == 0 else 0
         R = 1 if turn == 1 else 0
         P = pace + 1
-        return L, R, P
+
+        return L, R, P, hidden, logits
 
 
 class Brain:
     """
     Brain with two modes:
+      - 'random' (default): Phase 0 random policy.
+      - 'policy': load a TinyMLP from a saved state_dict (.pt) and use it.
 
-      - 'random' (default): Phase 0 random policy
-        L,R ∈ {(1,0),(0,1),(0,0)} with probs [0.3, 0.3, 0.4], P ∈ {1,2,3} uniform.
+    Random policy:
+      - L,R ∈ {(1,0),(0,1),(0,0)} with probs [0.3, 0.3, 0.4]
+      - P ∈ {1,2,3} uniform
 
-      - 'policy': TinyMLP loaded from a torch state_dict (.pt file).
-
-    NOTE: The NN now only sees [contrast_front, collided_prev].
-          J and heading/orientation are NOT inputs to the network.
+    In 'policy' mode, we also expose hidden activations + usage and logits
+    to the frontend via the 'debug' field.
     """
     def __init__(self, seed: Optional[int] = None):
         self.rng = random.Random(seed)
-        self.J: float = 0.0            # kept for logging / UI, but not used as NN input
+        self.J: float = 0.0
         self.wall_contrast: float = 0.0
         self.mode: str = "random"
         self.policy: Optional[_PolicyWrapper] = None
         self.policy_path: Optional[str] = None
 
+        # cumulative |activation| for each hidden unit (length HID)
+        self.hidden_usage = [0.0] * HID
+
     # --- lifecycle ---
+
     def reset(self, J: float, wall_contrast: float) -> None:
-        # J still exists as an environment parameter, but NN ignores it.
+        # J kept only for logging / potential future use; NOT fed to NN.
         self.J = float(J)
         self.wall_contrast = float(wall_contrast)
+        # reset usage at episode start
+        self.hidden_usage = [0.0] * HID
 
     # --- control ---
+
     def set_mode(self, mode: str) -> None:
         mode = mode.lower().strip()
         if mode not in ("random", "policy"):
@@ -125,7 +146,8 @@ class Brain:
     def describe_network(self) -> dict:
         """
         Return a JSON-serializable description of the current policy network.
-        Used by /nn for frontend visualization.
+        Assumes policy.model is TinyMLP with net = [Linear, Tanh, Linear].
+        Used by the /nn endpoint and the frontend NetworkView.
         """
         if self.policy is None or not hasattr(self.policy, "model"):
             return {
@@ -134,14 +156,16 @@ class Brain:
             }
 
         model = self.policy.model
-        # Sequential(Linear(IN_DIM, HID), Tanh, Linear(HID, OUT_DIM))
+        # We assume: Sequential(Linear(IN_DIM, HID), Tanh, Linear(HID, OUT_DIM))
         layer1 = model.net[0]
         layer2 = model.net[2]
 
-        w1 = layer1.weight.detach().cpu().tolist()   # [hidden][input]
-        b1 = layer1.bias.detach().cpu().tolist()
-        w2 = layer2.weight.detach().cpu().tolist()   # [output][hidden]
-        b2 = layer2.bias.detach().cpu().tolist()
+        import torch as _t
+
+        w1 = layer1.weight.detach().cpu().tolist()   # [HID, IN_DIM]
+        b1 = layer1.bias.detach().cpu().tolist()     # [HID]
+        w2 = layer2.weight.detach().cpu().tolist()   # [OUT_DIM, HID]
+        b2 = layer2.bias.detach().cpu().tolist()     # [OUT_DIM]
 
         input_labels = [
             "contrast_front",
@@ -164,24 +188,31 @@ class Brain:
             "output_labels": output_labels,
             "layers": {
                 "input_to_hidden": {
-                    "weights": w1,
+                    "weights": w1,  # [hidden][input]
                     "bias": b1,
                 },
                 "hidden_to_output": {
-                    "weights": w2,
+                    "weights": w2,  # [output][hidden]
                     "bias": b2,
                 },
             },
         }
 
     # --- stepping ---
+
     def act(self, obs: Dict[str, Any]) -> Dict[str, Any]:
-        # Policy mode (NN)
         if self.mode == "policy" and self.policy is not None:
-            L, R, P = self.policy.act({
+            # forward pass with introspection
+            L, R, P, hidden, logits = self.policy.act_with_debug({
                 "contrast_front": obs.get("contrast_front", 0.0),
                 "collided_prev": obs.get("collided_prev", 0),
             })
+
+            # update usage
+            self.hidden_usage = [
+                u + abs(a) for u, a in zip(self.hidden_usage, hidden)
+            ]
+
             return {
                 "L": L,
                 "R": R,
@@ -194,10 +225,13 @@ class Brain:
                     "policy_path": self.policy_path,
                     "obs_contrast": obs.get("contrast_front"),
                     "obs_collided_prev": obs.get("collided_prev"),
+                    "hidden": hidden,                    # current hidden activations
+                    "logits": logits,                    # output logits
+                    "hidden_usage": self.hidden_usage,   # cumulative |act|
                 },
             }
 
-        # Fallback: random Phase 0 policy
+        # fallback: random (Phase 0)
         lr_choices = [(1, 0), (0, 1), (0, 0)]
         lr_probs = [0.3, 0.3, 0.4]
         r = self.rng.random()

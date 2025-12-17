@@ -1,5 +1,3 @@
-// src/App.tsx
-
 import { useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import {
@@ -148,6 +146,15 @@ export default function App() {
   const [arenaMode, setArenaMode] = useState<ArenaMode>("uniform");
   const [sectorIndex, setSectorIndex] = useState<number>(0);
 
+  // NN activations
+  const [inputActs, setInputActs] = useState<number[] | null>(null);
+  const [hiddenActs, setHiddenActs] = useState<number[] | null>(null);
+  const [hiddenUsage, setHiddenUsage] = useState<number[] | null>(null);
+  const [logits, setLogits] = useState<number[] | null>(null);
+
+  // other UI
+  const [contrastDisplay, setContrastDisplay] = useState<number>(0);
+
   // internal refs to avoid re-creating intervals
   const tRef = useRef(0);
   const collidedPrevRef = useRef<0 | 1>(0);
@@ -172,6 +179,14 @@ export default function App() {
     collidedPrevRef.current = 0;
     setTDisplay(0);
     setCollidedDisplay(0);
+
+    // reset NN visual state
+    setInputActs(null);
+    setHiddenActs(null);
+    setHiddenUsage(null);
+    setLogits(null);
+    setContrastDisplay(0);
+
     ws.send({ type: "reset", seed, J, wall_contrast: wallC });
   };
 
@@ -218,17 +233,34 @@ export default function App() {
         heading_index: agent.heading,
       } as const;
 
+      // input activations = NN inputs
+      setInputActs([obs.contrast_front, obs.collided_prev]);
+      setContrastDisplay(obs.contrast_front);
+
       const stepMsg: StepMsg = { type: "step", obs };
 
       let L: 0 | 1 = 0;
       let R: 0 | 1 = 0;
       let P: 1 | 2 | 3 = 1;
       try {
-        const act = await ws.stepAndWait(stepMsg, 200);
+        const act: any = await ws.stepAndWait(stepMsg, 200);
         if (act) {
           L = act.L;
           R = act.R;
           P = act.P;
+
+          const dbg = act.debug;
+          if (dbg) {
+            if (Array.isArray(dbg.hidden)) {
+              setHiddenActs(dbg.hidden);
+            }
+            if (Array.isArray(dbg.hidden_usage)) {
+              setHiddenUsage(dbg.hidden_usage);
+            }
+            if (Array.isArray(dbg.logits)) {
+              setLogits(dbg.logits);
+            }
+          }
         }
       } catch {
         // ignore; fallback L=0,R=0,P=1 already set
@@ -416,6 +448,8 @@ export default function App() {
             <br />
             <b>t:</b> {tDisplay} &nbsp;|&nbsp; <b>collided_prev:</b>{" "}
             {collidedDisplay}
+            <br />
+            <b>contrast_front:</b> {contrastDisplay.toFixed(3)}
           </p>
 
           <p style={{ opacity: 0.8, fontSize: 14 }}>
@@ -423,7 +457,13 @@ export default function App() {
           </p>
         </div>
 
-        <NetworkView />
+        <NetworkView
+          inputActs={inputActs}
+          hiddenActs={hiddenActs}
+          hiddenUsage={hiddenUsage}
+          logits={logits}
+          contrast={contrastDisplay}
+        />
       </div>
     </div>
   );
