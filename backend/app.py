@@ -24,7 +24,7 @@ EP_DIR = os.path.join("runs", "episodes")
 os.makedirs(EP_DIR, exist_ok=True)
 
 # === path to your trained model (.pt) ===
-POLICY_PATH = os.path.join("evo", "neo.pt")
+POLICY_PATH = os.path.join("evo", "best4.pt")
 
 HTML = """<html><body>
 <h3>Circle-Arena Jellyfish backend</h3>

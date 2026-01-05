@@ -25,12 +25,12 @@ def main():
     os.makedirs(outdir, exist_ok=True)
 
     meta = {
-        "pop": 400,
-        "gens": 15,
-        "steps": 10000,
+        "pop": 70,
+        "gens": 40,
+        "steps": 20000,
         "J": 0.4,
-        "wall_contrast": 0.5,
-        "seed": 123,
+        "wall_contrast": 0.8,
+        "seed": 18,
     }
     with open(os.path.join(outdir, "meta.json"), "w") as f:
         json.dump(meta, f, indent=2)

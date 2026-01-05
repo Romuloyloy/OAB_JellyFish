@@ -15,8 +15,8 @@ from fitness import FoodField, per_step_reward
 def evaluate(
     weights_sd,
     J: float = 0.4,
-    wall_contrast: float = 0.6,
-    steps: int = 4000,
+    wall_contrast: float = 0.8,
+    steps: int = 8000,
     seed: int = 0
 ) -> Tuple[float, dict]:
     """
@@ -39,7 +39,7 @@ def evaluate(
 
     # environment
     env = Arena(J=J, wall_contrast=wall_contrast, seed=seed)
-    food = FoodField(n=2, seed=seed)  # TWO pellets at a time now
+    food = FoodField(n=20, seed=seed)  # TWO pellets at a time now
     env.reset()
 
     total_r = 0.0
@@ -72,7 +72,7 @@ def evaluate(
     }
 
 
-def mutate(sd, sigma=0.1, rng=None):
+def mutate(sd, sigma=0.2, rng=None):
     if rng is None:
         rng = random.Random()
     out = {}
